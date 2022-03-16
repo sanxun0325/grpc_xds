@@ -15,20 +15,12 @@ import (
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
 	grpcport   = flag.String("grpcport", "", "grpcport")
 	servername = flag.String("servername", "server1", "grpcport")
-	hs         *health.Server
-
-	conn *grpc.ClientConn
-)
-
-const (
-	address string = ":50051"
 )
 
 type server struct {

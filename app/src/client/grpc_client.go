@@ -2,7 +2,7 @@ package main
 
 import (
 	"echo"
-	"flag"
+	"fmt"
 	"net"
 
 	"log"
@@ -16,18 +16,12 @@ import (
 	_ "google.golang.org/grpc/xds" // use for xds-experimental:///be-srv
 )
 
-const ()
-
-var (
-	conn *grpc.ClientConn
-)
-
 func main() {
 
-	address := flag.String("host", "dns:///be.cluster.local:50051", "dns:///be.cluster.local:50051 or xds-experimental:///be-srv")
-	flag.Parse()
+	/*address := flag.String("host", "dns:///be.cluster.local:50051", "dns:///be.cluster.local:50051 or xds-experimental:///be-srv")
+	flag.Parse()*/
 
-	//address = fmt.Sprintf("xds-experimental:///be-srv")
+	address := fmt.Sprintf("xds:///be-srv")
 
 	// (optional) start background grpc admin services to monitor client
 	// "google.golang.org/grpc/admin"
@@ -50,7 +44,7 @@ func main() {
 		}
 	}()
 
-	conn, err := grpc.Dial(*address, grpc.WithInsecure())
+	conn, err := grpc.Dial(address, grpc.WithInsecure())
 
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
