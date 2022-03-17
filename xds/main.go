@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"strconv"
 	"strings"
 
@@ -19,9 +21,10 @@ import (
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	ep "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	lv2 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	v3routerpb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	v3httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -37,7 +40,6 @@ type UpstreamPorts []int
 
 // String is a method that implements the flag.Value interface
 func (u *UpstreamPorts) String() string {
-	// See: https://stackoverflow.com/a/37533144/609290
 	return strings.Join(strings.Fields(fmt.Sprint(*u)), ",")
 }
 
@@ -84,7 +86,6 @@ func init() {
 	flag.UintVar(&port, "port", 18000, "Management server port")
 	flag.UintVar(&gatewayPort, "gateway", 18001, "Management server port for HTTP gateway")
 	flag.StringVar(&mode, "ads", Ads, "Management server type (ads, xds, rest)")
-	// Converts repeated flags (e.g. `--upstream_port=50051 --upstream_port=50052`) into a []int
 	flag.Var(&upstreamPorts, "upstream_port", "list of upstream gRPC servers")
 }
 
@@ -119,7 +120,7 @@ func (cb *callbacks) OnStreamRequest(id int64, r *discovery.DiscoveryRequest) er
 	}
 	return nil
 }
-func (cb *callbacks) OnStreamResponse(id int64, req *discovery.DiscoveryRequest, resp *discovery.DiscoveryResponse) {
+func (cb *callbacks) OnStreamResponse(ctx context.Context, id int64, req *discovery.DiscoveryRequest, resp *discovery.DiscoveryResponse) {
 	log.Infof("OnStreamResponse... %d   Request [%v],  Response[%v]", id, req.TypeUrl, resp.TypeUrl)
 	cb.Report()
 }
@@ -201,20 +202,6 @@ func RunManagementServer(ctx context.Context, server xds.Server, port uint) {
 
 	grpcServer.GracefulStop()
 }
-
-// 11/11/20 TODO:  optionally set this up
-// // RunManagementGateway starts an HTTP gateway to an xDS server.
-// func RunManagementGateway(ctx context.Context, srv xds.Server, port uint) {
-// 	log.WithFields(log.Fields{"port": port}).Info("gateway listening HTTP/1.1")
-
-// 	server := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: &xds.HTTPGateway{Server: srv}}
-// 	go func() {
-// 		if err := server.ListenAndServe(); err != nil {
-// 			log.Error(err)
-// 		}
-// 	}()
-// }
-
 func main() {
 	flag.Parse()
 	if debug {
@@ -327,23 +314,32 @@ func main() {
 
 		// LISTENER
 		log.Infof(">>>>>>>>>>>>>>>>>>> creating LISTENER " + listenerName)
-		hcRds := &hcm.HttpConnectionManager_Rds{
-			Rds: &hcm.Rds{
-				RouteConfigName: routeConfigName,
-				ConfigSource: &core.ConfigSource{
-					ConfigSourceSpecifier: &core.ConfigSource_Ads{
-						Ads: &core.AggregatedConfigSource{},
+
+		pbst, err := ptypes.MarshalAny(&v3routerpb.Router{})
+		if err != nil {
+			panic(err)
+		}
+		manager := &hcm.HttpConnectionManager{
+			CodecType: hcm.HttpConnectionManager_AUTO,
+			RouteSpecifier: &hcm.HttpConnectionManager_Rds{
+				Rds: &hcm.Rds{
+					RouteConfigName: routeConfigName,
+					ConfigSource: &core.ConfigSource{
+						ConfigSourceSpecifier: &core.ConfigSource_Ads{
+							Ads: &core.AggregatedConfigSource{},
+						},
 					},
 				},
 			},
+			HttpFilters: []*hcm.HttpFilter{{
+				Name: "router",
+				ConfigType: &v3httppb.HttpFilter_TypedConfig{
+					TypedConfig: pbst,
+				},
+			}},
 		}
 
-		manager := &hcm.HttpConnectionManager{
-			CodecType:      hcm.HttpConnectionManager_AUTO,
-			RouteSpecifier: hcRds,
-		}
-
-		pbst, err := ptypes.MarshalAny(manager)
+		pbstM, err := ptypes.MarshalAny(manager)
 		if err != nil {
 			panic(err)
 		}
@@ -351,21 +347,44 @@ func main() {
 		l := []types.Resource{
 			&listener.Listener{
 				Name: listenerName,
-				ApiListener: &lv2.ApiListener{
-					ApiListener: pbst,
+				Address: &core.Address{
+					Address: &core.Address_SocketAddress{
+						SocketAddress: &core.SocketAddress{
+							Protocol: core.SocketAddress_TCP,
+							Address:  backendHostName,
+							PortSpecifier: &core.SocketAddress_PortValue{
+								PortValue: uint32(v),
+							},
+						},
+					},
 				},
+				FilterChains: []*listener.FilterChain{{
+					Filters: []*listener.Filter{{
+						Name: wellknown.HTTPConnectionManager,
+						ConfigType: &listener.Filter_TypedConfig{
+							TypedConfig: pbstM,
+						},
+					}},
+				}},
 			}}
-
-		rt := []types.Resource{}
-		sec := []types.Resource{}
 
 		// =================================================================================
 		atomic.AddInt32(&version, 1)
 		log.Infof(">>>>>>>>>>>>>>>>>>> creating snapshot Version " + fmt.Sprint(version))
 
-		snap := cachev3.NewSnapshot(fmt.Sprint(version), eds, cls, rds, l, rt, sec)
-
-		config.SetSnapshot(nodeId, snap)
+		resources := make(map[string][]types.Resource, 8)
+		resources[resource.EndpointType] = eds
+		resources[resource.ClusterType] = cls
+		resources[resource.RouteType] = rds
+		resources[resource.ListenerType] = l
+		snap, err := cachev3.NewSnapshot(fmt.Sprint(version), resources)
+		if err != nil {
+			fmt.Println(err)
+		}
+		err = config.SetSnapshot(ctx, nodeId, snap)
+		if err != nil {
+			fmt.Println(err)
+		}
 
 		time.Sleep(60 * time.Second)
 

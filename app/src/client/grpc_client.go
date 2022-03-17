@@ -18,9 +18,6 @@ import (
 
 func main() {
 
-	/*address := flag.String("host", "dns:///be.cluster.local:50051", "dns:///be.cluster.local:50051 or xds-experimental:///be-srv")
-	flag.Parse()*/
-
 	address := fmt.Sprintf("xds:///be-srv")
 
 	// (optional) start background grpc admin services to monitor client
